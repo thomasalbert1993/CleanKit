@@ -287,7 +287,7 @@ open class Interactor<V: ViewModel> {
     /// - Parameter handler: The callback to perform.
     ///
     /// - Note: The `handler` is always performed on main thread.
-    func observe(_ name: Notification.Name, for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
+    public func observe(_ name: Notification.Name, for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
         observe(NotificationCenter.default.publisher(for: name, object: object), dropFirst: false, handler: handler)
     }
 
@@ -298,7 +298,7 @@ open class Interactor<V: ViewModel> {
     /// - Parameter handler: The callback to perform.
     ///
     /// - Note: The `handler` is always performed on main thread.
-    func observe(_ names: Notification.Name..., for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
+    public func observe(_ names: Notification.Name..., for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
         for name in names {
             observe(name, for: object, handler: handler)
         }
@@ -311,7 +311,7 @@ open class Interactor<V: ViewModel> {
     /// - Parameter handler: The callback to perform.
     ///
     /// - Note: The `handler` is always performed on main thread.
-    func observe<T>(_ publisher: T, dropFirst: Bool = true, handler: @escaping (T.Output) -> Void) where T: Publisher, T.Failure == Never {
+    public func observe<T>(_ publisher: T, dropFirst: Bool = true, handler: @escaping (T.Output) -> Void) where T: Publisher, T.Failure == Never {
         publisher
             .receive(on: RunLoop.main)
             .dropFirst(dropFirst ? 1 : 0)
