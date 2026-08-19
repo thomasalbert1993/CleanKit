@@ -434,7 +434,7 @@ extension Interactor {
     /// - Parameter token: The `NavigationToken` returned by `navigate(to:)`.
     /// - Parameter event: The `NavigationEvent` to observe.
     /// - Parameter handler: The closure to perform when the event is triggered.
-    public func observe(_ token: NavigationToken, _ event: NavigationEvent, _ handler: @escaping () -> Void) where V: NavigableViewModel {
+    public func observeNavigation(token: NavigationToken, _ event: NavigationEvent, _ handler: @escaping () -> Void) where V: NavigableViewModel {
         let rule = NavigationHandler(event: event, handler: handler)
         navigationObservers[token, default: []].append(rule)
     }

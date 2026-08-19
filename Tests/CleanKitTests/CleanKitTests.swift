@@ -99,8 +99,8 @@ private final class ResultBox: @unchecked Sendable {
 
     let presented = Flag()
     let dismissed = Flag()
-    interactor.observe(token, .didAppear) { presented.value = true }
-    interactor.observe(token, .didDisappear) { dismissed.value = true }
+    interactor.observeNavigation(token: token, .didAppear) { presented.value = true }
+    interactor.observeNavigation(token: token, .didDisappear) { dismissed.value = true }
 
     interactor.handleNavigationEvent(.didAppear, for: token)
     #expect(presented.value)
@@ -116,7 +116,7 @@ private final class ResultBox: @unchecked Sendable {
     let token = interactor.navigate(to: .details(1))
 
     let count = Counter()
-    interactor.observe(token, .didAppear) { count.value += 1 }
+    interactor.observeNavigation(token: token, .didAppear) { count.value += 1 }
 
     interactor.handleNavigationEvent(.didAppear, for: token) // fires (1)
     interactor.handleNavigationEvent(.didDisappear, for: token) // releases the one-shot rules
@@ -131,7 +131,7 @@ private final class ResultBox: @unchecked Sendable {
     let token = interactor.navigate(to: .details(1))
 
     let fired = Flag()
-    interactor.observe(token, .minimumExposure(0.05)) { fired.value = true }
+    interactor.observeNavigation(token: token, .minimumExposure(0.05)) { fired.value = true }
     interactor.handleNavigationEvent(.didAppear, for: token)
 
     try? await Task.sleep(for: .seconds(0.25))
@@ -144,7 +144,7 @@ private final class ResultBox: @unchecked Sendable {
     let token = interactor.navigate(to: .details(1))
 
     let fired = Flag()
-    interactor.observe(token, .minimumExposure(0.25)) { fired.value = true }
+    interactor.observeNavigation(token: token, .minimumExposure(0.25)) { fired.value = true }
     interactor.handleNavigationEvent(.didAppear, for: token)
     interactor.handleNavigationEvent(.didDisappear, for: token) // leaves before the threshold
 
