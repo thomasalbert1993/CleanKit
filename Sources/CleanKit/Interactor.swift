@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import Combine
 
 @MainActor
 open class Interactor<V: ViewModel> {
@@ -275,6 +276,53 @@ open class Interactor<V: ViewModel> {
     }
     
     
+    //--------------------------------------------
+    // MARK: Observing notifications & publishers
+    //--------------------------------------------
+
+    /// Observes a given notification.
+    ///
+    /// - Parameter name: The notification name to observe.
+    /// - Parameter object: The filtering target object.
+    /// - Parameter handler: The callback to perform.
+    ///
+    /// - Note: The `handler` is always performed on main thread.
+    func observe(_ name: Notification.Name, for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
+        observe(NotificationCenter.default.publisher(for: name, object: object), dropFirst: false, handler: handler)
+    }
+
+    /// Observes a set of notifications.
+    ///
+    /// - Parameter names: The notification names to observe.
+    /// - Parameter object: The filtering target object.
+    /// - Parameter handler: The callback to perform.
+    ///
+    /// - Note: The `handler` is always performed on main thread.
+    func observe(_ names: Notification.Name..., for object: AnyObject? = nil, handler: @escaping (Notification) -> Void) {
+        for name in names {
+            observe(name, for: object, handler: handler)
+        }
+    }
+
+    /// Observes a given publisher.
+    ///
+    /// - Parameter publisher: The publisher to observe.
+    /// - Parameter dropFirst: Indicates whether the initial value should be dropped.
+    /// - Parameter handler: The callback to perform.
+    ///
+    /// - Note: The `handler` is always performed on main thread.
+    func observe<T>(_ publisher: T, dropFirst: Bool = true, handler: @escaping (T.Output) -> Void) where T: Publisher, T.Failure == Never {
+        publisher
+            .receive(on: RunLoop.main)
+            .dropFirst(dropFirst ? 1 : 0)
+            .sink { value in
+                handler(value)
+            }
+            .store(in: &cancellables)
+    }
+
+    
+    
     //---------------
     // MARK: Private
     //---------------
@@ -291,6 +339,7 @@ open class Interactor<V: ViewModel> {
     private var loadGates = TaskGateMap<AnyKeyPath>()
     private var navigationObservers = [NavigationToken: [NavigationHandler]]()
     private var exposureTimers = [NavigationToken: [Task<Void, Never>]]()
+    private var cancellables: Set<AnyCancellable> = []
     private var hasPrepared = false
     
     internal func handleNavigationEvent(_ event: NavigationEvent, for token: NavigationToken) {
