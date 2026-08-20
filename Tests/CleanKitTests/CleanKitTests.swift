@@ -13,7 +13,6 @@ private struct TestError: Error {}
 @Observable
 @MainActor
 private final class TestViewModel: NavigableViewModel {
-    var isWaiting = false
     var navigation: NavigationIntent<TestDestination>?
 
     // Screen-specific state added directly on the leaf class (the case that failed under inheritance).
@@ -42,6 +41,10 @@ private final class ResultBox: @unchecked Sendable {
     var value: Interactor<TestViewModel>.CompletionResult?
 }
 
+private final class BusyLog: @unchecked Sendable {
+    var values: [Bool] = []
+}
+
 @MainActor
 @Test func customStateOnLeafClassIsObserved() {
     let vm = TestViewModel()
@@ -66,16 +69,6 @@ private final class ResultBox: @unchecked Sendable {
 
     interactor.consumeNavigation(token: token)
     #expect(vm.navigation == nil)
-}
-
-@MainActor
-@Test func prepareResetsTransientState() {
-    let vm = TestViewModel()
-    vm.isWaiting = true
-
-    Interactor(viewModel: vm).prepareIfNeeded()
-
-    #expect(vm.isWaiting == false, "The binding entry point must clear the ambient waiting flag before preparing")
 }
 
 @MainActor
@@ -150,15 +143,18 @@ private final class ResultBox: @unchecked Sendable {
 }
 
 @MainActor
-@Test func asyncTaskIgnoresReentryWhileLocked() async {
-    let vm = TestViewModel()
-    let interactor = Interactor(viewModel: vm)
-    vm.isWaiting = true // simulate an in-flight task
+@Test func asyncTaskIgnoresReentryWhileBusy() async {
+    let interactor = Interactor(viewModel: TestViewModel())
+
+    // The first task acquires the busy lock synchronously (before its body runs).
+    interactor.asyncTask({ try await Task.sleep(for: .seconds(10)) })
 
     var result: Interactor<TestViewModel>.CompletionResult?
     interactor.asyncTask({ /* never runs */ }, finally: { result = $0 })
 
     #expect(result == .ignored)
+
+    interactor.cancelTasks()
 }
 
 @MainActor
@@ -404,6 +400,61 @@ private struct ErrorHandlingTests {
         }
 
         #expect(caught.value, "An asyncTask failure with no explicit onFailure must route through handleError")
+    }
+}
+
+
+//--------------------
+// MARK: Busy handling
+//--------------------
+
+// Like the error tests, the resolution chain runs entirely on the interactor's own state
+// (`onBusy` / `ambientBusyHandler`), so these carry no shared state and are parallel-safe.
+@MainActor
+private struct BusyHandlingTests {
+
+    @Test func handleBusyIsNoOpWhenNoHandlersInstalled() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        // With neither handler set, the transition is simply not surfaced — must be a safe no-op.
+        interactor.handleBusy(true)
+    }
+
+    @Test func perBindBusyHandlerTakesPriority() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        var perBind: Bool?
+        interactor.onBusy = { perBind = $0 }
+        var ambientCalled = false
+        interactor.ambientBusyHandler = { _ in ambientCalled = true }
+
+        interactor.handleBusy(true)
+
+        #expect(perBind == true, "The per-bind busy handler must receive the state")
+        #expect(!ambientCalled, "The per-bind handler must take priority over the ambient one")
+    }
+
+    @Test func ambientBusyHandlerUsedWhenNoPerBind() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        var received: Bool?
+        interactor.ambientBusyHandler = { received = $0 }
+
+        interactor.handleBusy(true)
+
+        #expect(received == true)
+    }
+
+    @Test func asyncTaskReportsBusyTrueThenFalse() async {
+        let interactor = Interactor(viewModel: TestViewModel())
+        let log = BusyLog()
+        interactor.ambientBusyHandler = { log.values.append($0) }
+
+        interactor.asyncTask({ /* quick no-op */ })
+        while log.values.count < 2 { await Task.yield() }
+
+        #expect(log.values == [true, false], "A task must flip the interactor busy while it runs, then idle")
+        #expect(!interactor.isBusy, "The interactor must no longer be busy once the task finishes")
     }
 }
 

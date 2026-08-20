@@ -58,8 +58,6 @@ enum HomeDestination {
 @Observable
 @MainActor
 final class HomeViewModel: NavigableViewModel {
-    var errorMessage: String?                       // ambient error channel
-    var isWaiting = false                           // ambient "busy" flag
     var navigation: NavigationIntent<HomeDestination>?
 
     var feed: Loadable<[Post]> = .idle              // per-content load state
@@ -170,14 +168,14 @@ func submit() {
     asyncTask {
         try await api.submit(form)
     }
-    // On failure the error is routed to viewModel.errorMessage.
-    // Guarded by viewModel.isWaiting: a second call while busy is ignored.
+    // On failure the error is routed to the interactor's error handlers (see below).
+    // Guarded by the interactor's busy flag: a second call while busy is ignored.
 }
 ```
 
 Variants:
 
-- `asyncTask(_:onFailure:finally:)` — gated by the ambient `isWaiting` flag.
+- `asyncTask(_:onFailure:finally:)` — gated by the interactor's ambient busy flag.
 - `asyncTask(gate:)` / `asyncTask(gateKey:)` — gated by a custom `TaskGate`.
 - `performThrowable(_:onFailure:)` — synchronous throwing work.
 
@@ -185,16 +183,39 @@ Every task is **cancelled automatically** when the interactor is torn down (or v
 Cancellation is cooperative — long work should honour `Task.isCancelled` / use cancellation-aware APIs.
 A cancelled task reports `.cancelled` and does **not** surface an error.
 
+## Error & busy handling
+
+Errors and the busy state are surfaced through **closures**, not view model properties — the view model
+is a plain marker (`AnyObject, Observable`). Each has a two-tier chain: a **per-bind** handler that
+takes priority, and an **ambient** handler scoped to the view subtree.
+
+```swift
+// Per-bind: this screen handles its own error / spinner.
+.bind(interactor,
+      onError: { error in showToast(error); return true },   // return true = handled, stop
+      onBusy: { isBusy = $0 })
+
+// Ambient: a fallback for every interactor bound below, e.g. at the app root.
+RootView()
+    .onInteractorError { error in log(error) }
+    .onInteractorBusy { showGlobalOverlay($0) }
+```
+
+- **Errors** — the per-bind `onError` returns `Bool`: `true` marks it handled and stops; `false` falls
+  through to the ambient `onInteractorError`. If neither handles it, the error is dropped.
+- **Busy** — driven by `asyncTask(_:onFailure:finally:)`. When present, per-bind `onBusy` takes over;
+  otherwise the ambient `onInteractorBusy` fires. Bridge the `Bool` into your own `@State` for display.
+
 ## Loadable content
 
-`Loadable<T>` models one piece of content, independently of the ambient `errorMessage` / `isWaiting`:
+`Loadable<T>` models one piece of content, independently of the interactor's error and busy handlers:
 
 ```swift
 var feed: Loadable<[Post]> = .idle
 ```
 
 Drive it with `load(_:)`, which manages `.loading → .loaded / .failed`, captures the error **in the
-`Loadable`** (not in `errorMessage`), gates per key path, and resets to `.idle` if cancelled:
+`Loadable`** (not through the error handlers), gates per key path, and resets to `.idle` if cancelled:
 
 ```swift
 func loadFeed() {

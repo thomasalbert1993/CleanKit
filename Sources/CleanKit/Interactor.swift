@@ -26,7 +26,6 @@ open class Interactor<V: ViewModel> {
     func prepareIfNeeded() {
         guard !hasPrepared else { return }
         hasPrepared = true
-        viewModel.isWaiting = false
         prepare()
     }
     
@@ -76,8 +75,29 @@ open class Interactor<V: ViewModel> {
         if let onError, onError(error) { return }
         ambientErrorHandler?(error)
     }
-    
-    
+
+    /// The interactor's ambient busy state, driven by `asyncTask(_:onFailure:finally:)`.
+    ///
+    /// Doubles as the re-entrancy lock for that overload (a task is ignored while busy) and, on every
+    /// change, notifies the busy handlers so a view can reflect it.
+    public private(set) var isBusy = false
+
+    /// Reports a busy transition through the interactor's busy-handling chain.
+    ///
+    /// Resolution mirrors `handleError(_:)`: the per-bind handler from `bind(_:onBusy:)` takes priority
+    /// and, when absent, the ambient handler installed with `onInteractorBusy(_:)` on an ancestor view
+    /// is used. If neither is set, the transition is simply not surfaced.
+    ///
+    /// - Parameter isBusy: Whether a task is now in flight.
+    open func handleBusy(_ isBusy: Bool) {
+        if let onBusy {
+            onBusy(isBusy)
+            return
+        }
+        ambientBusyHandler?(isBusy)
+    }
+
+
     //-------------------
     // MARK: Async tasks
     //-------------------
@@ -105,7 +125,11 @@ open class Interactor<V: ViewModel> {
     
     public typealias CompletionHandler = (CompletionResult) -> Void
     
-    /// Performs an asynchronous task, locked by the global `isWaiting` flag.
+    /// Performs an asynchronous task, locked by the interactor's ambient busy flag.
+    ///
+    /// While the task runs the interactor is marked busy; a second call is ignored until it finishes.
+    /// Busy transitions are reported to the busy handlers (`bind(_:onBusy:)` and, failing that,
+    /// `onInteractorBusy(_:)`) so a view can drive a spinner or overlay.
     ///
     /// - Parameter task: The task to perform.
     /// - Parameter onFailure: A closure performed when an error is encountered during
@@ -113,15 +137,16 @@ open class Interactor<V: ViewModel> {
     /// `handleError(_:)` (the interactor's error-handling chain).
     /// - Parameter finally: A closure performed when the task has completed or failed.
     ///
-    /// - Note: The task won't be executed if the `isWaiting` flag is already set.
+    /// - Note: The task won't be executed if the interactor is already busy.
     public func asyncTask(_ task: @escaping () async throws -> Void, onFailure: ((Error) -> Void)? = nil, finally: CompletionHandler? = nil) {
-        let viewModel = viewModel
         asyncTask(
-            lockGetter: {
-                viewModel.isWaiting
+            lockGetter: { [weak self] in
+                self?.isBusy ?? false
             },
-            lockSetter: { value in
-                viewModel.isWaiting = value
+            lockSetter: { [weak self] value in
+                guard let self else { return }
+                isBusy = value
+                handleBusy(value)
             },
             task: task,
             onFailure: onFailure,
@@ -342,7 +367,10 @@ open class Interactor<V: ViewModel> {
     
     var onError: ((Error) -> Bool)?
     var ambientErrorHandler: ((Error) -> Void)?
-    
+
+    var onBusy: ((Bool) -> Void)?
+    var ambientBusyHandler: ((Bool) -> Void)?
+
     internal func handleNavigationEvent(_ event: NavigationEvent, for token: NavigationToken) {
         switch event {
 
@@ -453,16 +481,19 @@ extension View {
     /// - Parameter setup: An optional closure to configure the interactor before it prepares, called
     /// on the view's `onAppear`.
     /// - Parameter onError: An optional per-bind error handler, consulted by the interactor before the
-    /// global `onInteractorError(_:)` handler and the view model fallback. Return `true` if you handled
-    /// the error, or `false` to let it propagate down the chain.
+    /// ambient `onInteractorError(_:)` handler. Return `true` if you handled the error, or `false` to
+    /// let it propagate down the chain.
+    /// - Parameter onBusy: An optional per-bind busy handler, called with the interactor's busy state
+    /// as it changes. When provided it takes priority over the ambient `onInteractorBusy(_:)` handler.
     ///
     /// - Returns: A view bound to the given interactor.
     public func bind<V: ViewModel, I: Interactor<V>>(
         _ interactor: I,
         setup: ((I) -> Void)? = nil,
-        onError: ((Error) -> Bool)? = nil
+        onError: ((Error) -> Bool)? = nil,
+        onBusy: ((Bool) -> Void)? = nil
     ) -> some View {
-        modifier(InteractorModifier(interactor: interactor, setup: setup, onError: onError))
+        modifier(InteractorModifier(interactor: interactor, setup: setup, onError: onError, onBusy: onBusy))
     }
 
     /// Binds a navigable interactor to the view, driving its lifecycle and navigation.
@@ -475,8 +506,10 @@ extension View {
     /// - Parameter setup: An optional closure to configure the interactor before it prepares, called
     /// on the view's `onAppear`.
     /// - Parameter onError: An optional per-bind error handler, consulted by the interactor before the
-    /// global `onInteractorError(_:)` handler and the view model fallback. Return `true` if you handled
-    /// the error, or `false` to let it propagate down the chain.
+    /// ambient `onInteractorError(_:)` handler. Return `true` if you handled the error, or `false` to
+    /// let it propagate down the chain.
+    /// - Parameter onBusy: An optional per-bind busy handler, called with the interactor's busy state
+    /// as it changes. When provided it takes priority over the ambient `onInteractorBusy(_:)` handler.
     /// - Parameter onNavigation: A closure mapping a navigation destination to the presentation used
     /// to display it.
     ///
@@ -485,9 +518,10 @@ extension View {
         _ interactor: I,
         setup: ((I) -> Void)? = nil,
         onError: ((Error) -> Bool)? = nil,
+        onBusy: ((Bool) -> Void)? = nil,
         onNavigation: @escaping (V.Destination) -> IntentPresentation
     ) -> some View {
-        bind(interactor, setup: setup, onError: onError).modifier(NavigationIntentModifier(interactor: interactor, presentation: onNavigation))
+        bind(interactor, setup: setup, onError: onError, onBusy: onBusy).modifier(NavigationIntentModifier(interactor: interactor, presentation: onNavigation))
     }
     
     /// Installs a fallback error handler for every interactor bound within this view's subtree.
@@ -504,6 +538,20 @@ extension View {
     public func onInteractorError(_ callback: @escaping (Error) -> Void) -> some View {
         modifier(InteractorErrorHandlerModifier(callback: callback))
     }
+
+    /// Installs a fallback busy handler for every interactor bound within this view's subtree.
+    ///
+    /// The handler flows down through the environment, so it applies to this view and its descendants
+    /// only — apply it on an ancestor of the `bind(_:)`-ed views (typically near the root of a feature
+    /// or app) to drive a shared loading overlay. It is called with the busy state whenever it changes,
+    /// unless a per-bind `bind(_:onBusy:)` handler is provided, which takes priority.
+    ///
+    /// - Parameter callback: The closure invoked with the interactor's busy state as it changes.
+    ///
+    /// - Returns: A view that scopes the handler to its subtree.
+    public func onInteractorBusy(_ callback: @escaping (Bool) -> Void) -> some View {
+        modifier(InteractorBusyHandlerModifier(callback: callback))
+    }
 }
 
 private struct InteractorModifier<V: ViewModel, I: Interactor<V>>: ViewModifier {
@@ -513,8 +561,11 @@ private struct InteractorModifier<V: ViewModel, I: Interactor<V>>: ViewModifier 
     /// Some setup to apply to the interactor before calling `prepareIfNeeded`.
     var setup: ((I) -> Void)?
     /// The per-bind error handler forwarded to the interactor. Return `true` to mark an error as
-    /// handled, `false` to let it fall through to the ambient handler and the view model.
+    /// handled, `false` to let it fall through to the ambient handler.
     var onError: ((Error) -> Bool)?
+    /// The per-bind busy handler forwarded to the interactor. When set it takes priority over the
+    /// ambient busy handler.
+    var onBusy: ((Bool) -> Void)?
 
     @ViewBuilder
     func body(content: Content) -> some View {
@@ -523,16 +574,19 @@ private struct InteractorModifier<V: ViewModel, I: Interactor<V>>: ViewModifier 
                 setup?(interactor)
                 interactor.onError = onError
                 interactor.ambientErrorHandler = ambientErrorHandler?.handle
+                interactor.onBusy = onBusy
+                interactor.ambientBusyHandler = ambientBusyHandler?.handle
                 interactor.prepareIfNeeded()
             }
     }
-    
-    
+
+
     //---------------
     // MARK: Private
     //---------------
-    
+
     @Environment(\.interactorErrorHandler) private var ambientErrorHandler
+    @Environment(\.interactorBusyHandler) private var ambientBusyHandler
 }
 
 /// Scopes the ambient error handler to a view subtree via the environment.
@@ -576,5 +630,47 @@ extension EnvironmentValues {
     fileprivate var interactorErrorHandler: InteractorErrorHandler? {
         get { self[InteractorErrorHandlerKey.self] }
         set { self[InteractorErrorHandlerKey.self] = newValue }
+    }
+}
+
+/// Scopes the ambient busy handler to a view subtree via the environment.
+///
+/// Mirrors `InteractorErrorHandlerModifier`: the carrier is held in `@State` for a stable identity so
+/// the environment (which compares by reference) doesn't invalidate readers on every pass, and the
+/// closure is wrapped in a reference type rather than stored directly (SwiftUI cannot compare closures).
+private struct InteractorBusyHandlerModifier: ViewModifier {
+    @State private var handler: InteractorBusyHandler
+
+    init(callback: @escaping (Bool) -> Void) {
+        _handler = State(initialValue: InteractorBusyHandler(callback))
+    }
+
+    func body(content: Content) -> some View {
+        content.environment(\.interactorBusyHandler, handler)
+    }
+}
+
+/// Carries the ambient busy handler through the environment.
+///
+/// A reference type so the environment compares it by identity; the closure it wraps is never compared
+/// by SwiftUI — it only ever lives inside this class and, once injected, inside the interactor.
+@MainActor
+private final class InteractorBusyHandler {
+    let handle: (Bool) -> Void
+
+    init(_ handle: @escaping (Bool) -> Void) {
+        self.handle = handle
+    }
+}
+
+private struct InteractorBusyHandlerKey: EnvironmentKey {
+    static let defaultValue: InteractorBusyHandler? = nil
+}
+
+extension EnvironmentValues {
+    /// The ambient busy handler installed by `onInteractorBusy(_:)`, scoped to a view subtree.
+    fileprivate var interactorBusyHandler: InteractorBusyHandler? {
+        get { self[InteractorBusyHandlerKey.self] }
+        set { self[InteractorBusyHandlerKey.self] = newValue }
     }
 }

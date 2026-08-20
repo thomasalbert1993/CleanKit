@@ -3,14 +3,13 @@ import Observation
 
 /// The base requirements for a view model.
 ///
-/// Conforming types are the passive, observable state containers that views render and interactors
-/// mutate. Declare them as `@Observable` classes so SwiftUI gets per-property invalidation:
+/// A marker for the passive, observable state containers that views render and interactors mutate.
+/// Declare them as `@Observable` classes so SwiftUI gets per-property invalidation:
 ///
 /// ```swift
 /// @Observable
 /// @MainActor
 /// final class HomeViewModel: ViewModel {
-///     var isWaiting = false
 ///     // ... screen-specific state ...
 /// }
 /// ```
@@ -19,9 +18,6 @@ import Observation
 /// compose against these protocols rather than inheriting from a base class.
 @MainActor
 public protocol ViewModel: AnyObject, Observable {
-
-    /// Whether a global asynchronous task is currently running.
-    var isWaiting: Bool { get set }
 }
 
 /// A view model that can emit navigation intents to its view.
@@ -30,7 +26,6 @@ public protocol ViewModel: AnyObject, Observable {
 /// @Observable
 /// @MainActor
 /// final class HomeViewModel: NavigableViewModel {
-///     var isWaiting = false
 ///     var navigation: NavigationIntent<HomeDestination>?
 ///     // ... screen-specific state ...
 /// }
