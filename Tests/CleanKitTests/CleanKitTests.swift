@@ -13,7 +13,6 @@ private struct TestError: Error {}
 @Observable
 @MainActor
 private final class TestViewModel: NavigableViewModel {
-    var errorMessage: String?
     var isWaiting = false
     var navigation: NavigationIntent<TestDestination>?
 
@@ -72,13 +71,11 @@ private final class ResultBox: @unchecked Sendable {
 @MainActor
 @Test func prepareResetsTransientState() {
     let vm = TestViewModel()
-    vm.errorMessage = "boom"
     vm.isWaiting = true
 
-    Interactor(viewModel: vm).prepare()
+    Interactor(viewModel: vm).prepareIfNeeded()
 
-    #expect(vm.errorMessage == nil)
-    #expect(vm.isWaiting == false)
+    #expect(vm.isWaiting == false, "The binding entry point must clear the ambient waiting flag before preparing")
 }
 
 @MainActor
@@ -193,12 +190,14 @@ private final class ResultBox: @unchecked Sendable {
 @Test func loadCapturesErrorInLoadableNotAmbientChannel() async {
     let vm = TestViewModel()
     let interactor = Interactor(viewModel: vm)
+    let ambientCalled = Flag()
+    interactor.ambientErrorHandler = { _ in ambientCalled.value = true }
 
     interactor.load(\.feed) { throw TestError() }
     while vm.feed.isLoading { await Task.yield() }
 
     #expect(vm.feed.error is TestError)
-    #expect(vm.errorMessage == nil, "A Loadable failure must not leak into the ambient errorMessage")
+    #expect(!ambientCalled.value, "A Loadable failure must not leak into the interactor's error-handling chain")
 }
 
 @MainActor
@@ -322,6 +321,90 @@ private final class ResultBox: @unchecked Sendable {
 
     try? await Task.sleep(for: .seconds(0.3))
     #expect(outcome.value == .cancelled)
+}
+
+//---------------------
+// MARK: Error handling
+//---------------------
+
+// The resolution chain is exercised entirely on the interactor's own state (`onError` /
+// `ambientErrorHandler`), so these tests carry no shared state and are safe to run in parallel.
+@MainActor
+private struct ErrorHandlingTests {
+
+    @Test func handleErrorIsNoOpWhenNoHandlersInstalled() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        // With neither a per-bind nor an ambient handler, the error is dropped — this must be a
+        // safe no-op and never trap.
+        interactor.handleError(TestError())
+    }
+
+    @Test func perBindHandlerTakesPriorityAndShortCircuits() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        var caught: Error?
+        interactor.onError = { caught = $0; return true }
+        var ambientCalled = false
+        interactor.ambientErrorHandler = { _ in ambientCalled = true }
+
+        interactor.handleError(TestError())
+
+        #expect(caught is TestError, "The per-bind handler must receive the error")
+        #expect(!ambientCalled, "A handled per-bind error must not fall through to the ambient handler")
+    }
+
+    @Test func perBindHandlerCanDeclineAndFallThroughToAmbient() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        interactor.onError = { _ in false } // declines: not handled
+        var ambientCaught: Error?
+        interactor.ambientErrorHandler = { ambientCaught = $0 }
+
+        interactor.handleError(TestError())
+
+        #expect(ambientCaught is TestError, "A declined per-bind error must fall through to the ambient handler")
+    }
+
+    @Test func ambientHandlerUsedWhenNoPerBindHandler() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        var ambientCaught: Error?
+        interactor.ambientErrorHandler = { ambientCaught = $0 }
+
+        interactor.handleError(TestError())
+
+        #expect(ambientCaught is TestError)
+    }
+
+    @Test func declinedErrorWithNoAmbientHandlerIsDropped() {
+        let interactor = Interactor(viewModel: TestViewModel())
+
+        var consulted = false
+        interactor.onError = { _ in consulted = true; return false } // declines, and no ambient handler installed
+
+        // The declined error has nowhere left to go; this must be a safe no-op.
+        interactor.handleError(TestError())
+
+        #expect(consulted, "The per-bind handler must still be consulted even when it declines")
+    }
+
+    @Test func asyncTaskFailureRoutesThroughErrorHierarchy() async {
+        let vm = TestViewModel()
+        let interactor = Interactor(viewModel: vm)
+
+        let caught = Flag()
+        interactor.onError = { _ in caught.value = true; return true }
+
+        await withCheckedContinuation { continuation in
+            interactor.asyncTask(gate: TaskGate(), task: { throw TestError() }, finally: { result in
+                #expect(result == .failed)
+                continuation.resume()
+            })
+        }
+
+        #expect(caught.value, "An asyncTask failure with no explicit onFailure must route through handleError")
+    }
 }
 
 @MainActor

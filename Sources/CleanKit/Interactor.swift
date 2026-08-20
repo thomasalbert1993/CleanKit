@@ -26,7 +26,6 @@ open class Interactor<V: ViewModel> {
     func prepareIfNeeded() {
         guard !hasPrepared else { return }
         hasPrepared = true
-        viewModel.errorMessage = nil
         viewModel.isWaiting = false
         prepare()
     }
@@ -39,10 +38,10 @@ open class Interactor<V: ViewModel> {
     /// Runs a synchronous throwing block, routing any thrown error through the interactor's
     /// error handling.
     ///
-    /// If `block` throws, the error is forwarded to `handleError(_:)` (which surfaces it on the
-    /// view model) and then to `onFailure`, if provided. Use this to keep `do`/`catch` boilerplate
-    /// out of views for synchronous work; for asynchronous work, use one of the `asyncTask(...)`
-    /// functions instead.
+    /// If `block` throws, the error is forwarded to `handleError(_:)` (the interactor's error-handling
+    /// chain) and then to `onFailure`, if provided. Use this to keep `do`/`catch` boilerplate out of
+    /// views for synchronous work; for asynchronous work, use one of the `asyncTask(...)` functions
+    /// instead.
     ///
     /// - Parameter block: The throwing work to perform.
     /// - Parameter onFailure: An optional closure called with the error after it has been handled.
@@ -56,27 +55,26 @@ open class Interactor<V: ViewModel> {
         }
     }
 
-    /// Handles an error by surfacing it on the view model's `errorMessage`.
+    /// Handles an error by resolving it through the interactor's error-handling chain.
     ///
     /// This is the single funnel every error flows through when no explicit `onFailure` handler is
-    /// provided (`performThrowable`, `asyncTask`, gated tasks…). Override to customize how errors are
-    /// handled — e.g. logging, mapping to domain-specific states, or routing to a different surface.
+    /// provided (`performThrowable`, `asyncTask`, gated tasks…). Resolution happens in order:
+    ///
+    /// 1. The per-bind handler passed to `bind(_:onError:)`, if any. Returning `true` marks the error
+    ///    as handled and stops here; returning `false` lets it fall through.
+    /// 2. The ambient handler inherited from the environment, installed with `onInteractorError(_:)`
+    ///    on an ancestor view, if any.
+    ///
+    /// If neither handles the error, it is dropped. Install at least one handler (or override this
+    /// function) to surface errors.
+    ///
+    /// Override to customize how errors are handled — e.g. logging, mapping to domain-specific states,
+    /// or routing to a different surface.
     ///
     /// - Parameter error: The error to handle.
     open func handleError(_ error: Error) {
-        viewModel.errorMessage = presentableMessage(for: error)
-    }
-
-    /// Produces the user-facing message for a given error.
-    ///
-    /// Defaults to `error.localizedDescription`. Override to provide localized, user-friendly copy —
-    /// for example by matching against your own error types.
-    ///
-    /// - Parameter error: The error to describe.
-    ///
-    /// - Returns: The message to display to the user.
-    open func presentableMessage(for error: Error) -> String {
-        error.localizedDescription
+        if let onError, onError(error) { return }
+        ambientErrorHandler?(error)
     }
     
     
@@ -110,9 +108,9 @@ open class Interactor<V: ViewModel> {
     /// Performs an asynchronous task, locked by the global `isWaiting` flag.
     ///
     /// - Parameter task: The task to perform.
-    /// - Parameter onFailure: A closured performed when an errors is encountered during
-    /// the task excecution. When this parameter is `nil` the error is forwarded to the
-    /// view model's `error` property.
+    /// - Parameter onFailure: A closure performed when an error is encountered during
+    /// the task execution. When this parameter is `nil` the error is forwarded to
+    /// `handleError(_:)` (the interactor's error-handling chain).
     /// - Parameter finally: A closure performed when the task has completed or failed.
     ///
     /// - Note: The task won't be executed if the `isWaiting` flag is already set.
@@ -136,9 +134,9 @@ open class Interactor<V: ViewModel> {
     /// - Parameter lockGetter: A closure returning the current lock value.
     /// - Parameter lockSetter: A closure for updating the lock value.
     /// - Parameter task: The task to perform.
-    /// - Parameter onFailure: A closured performed when an errors is encountered during
-    /// the task excecution. When this parameter is `nil` the error is forwarded to the
-    /// view model's `error` property.
+    /// - Parameter onFailure: A closure performed when an error is encountered during
+    /// the task execution. When this parameter is `nil` the error is forwarded to
+    /// `handleError(_:)` (the interactor's error-handling chain).
     /// - Parameter finally: A closure performed when the task has completed or failed.
     ///
     /// - Note: The task won't be executed if the lock is already set.
@@ -243,7 +241,7 @@ open class Interactor<V: ViewModel> {
     ///
     /// Drives the state machine automatically: `.loading` → `.loaded` on success, `.failed` on error.
     /// Unlike `asyncTask`, the error is captured in the `Loadable` itself and is **not** forwarded to
-    /// the ambient `errorMessage`. Each `Loadable` property is gated independently, so a reload while a
+    /// the interactor's error-handling chain. Each `Loadable` property is gated independently, so a reload while a
     /// load for the same key path is already in flight is ignored; different properties load in parallel.
     /// If cancelled (e.g. the interactor is torn down), the property is reset to `.idle`.
     ///
@@ -341,6 +339,9 @@ open class Interactor<V: ViewModel> {
     private var exposureTimers = [NavigationToken: [Task<Void, Never>]]()
     private var cancellables: Set<AnyCancellable> = []
     private var hasPrepared = false
+    
+    var onError: ((Error) -> Bool)?
+    var ambientErrorHandler: ((Error) -> Void)?
     
     internal func handleNavigationEvent(_ event: NavigationEvent, for token: NavigationToken) {
         switch event {
@@ -451,10 +452,17 @@ extension View {
     /// - Parameter interactor: The interactor to bind to the view.
     /// - Parameter setup: An optional closure to configure the interactor before it prepares, called
     /// on the view's `onAppear`.
+    /// - Parameter onError: An optional per-bind error handler, consulted by the interactor before the
+    /// global `onInteractorError(_:)` handler and the view model fallback. Return `true` if you handled
+    /// the error, or `false` to let it propagate down the chain.
     ///
     /// - Returns: A view bound to the given interactor.
-    public func bind<V: ViewModel, I: Interactor<V>>(_ interactor: I, setup: ((I) -> Void)? = nil) -> some View {
-        modifier(InteractorModifier(interactor: interactor, setup: setup))
+    public func bind<V: ViewModel, I: Interactor<V>>(
+        _ interactor: I,
+        setup: ((I) -> Void)? = nil,
+        onError: ((Error) -> Bool)? = nil
+    ) -> some View {
+        modifier(InteractorModifier(interactor: interactor, setup: setup, onError: onError))
     }
 
     /// Binds a navigable interactor to the view, driving its lifecycle and navigation.
@@ -466,12 +474,35 @@ extension View {
     /// - Parameter interactor: The interactor to bind to the view.
     /// - Parameter setup: An optional closure to configure the interactor before it prepares, called
     /// on the view's `onAppear`.
+    /// - Parameter onError: An optional per-bind error handler, consulted by the interactor before the
+    /// global `onInteractorError(_:)` handler and the view model fallback. Return `true` if you handled
+    /// the error, or `false` to let it propagate down the chain.
     /// - Parameter onNavigation: A closure mapping a navigation destination to the presentation used
     /// to display it.
     ///
     /// - Returns: A view bound to the given interactor, presenting its navigation destinations.
-    public func bind<V: NavigableViewModel, I: Interactor<V>>(_ interactor: I, setup: ((I) -> Void)? = nil, onNavigation: @escaping (V.Destination) -> IntentPresentation) -> some View {
-        bind(interactor, setup: setup).modifier(NavigationIntentModifier(interactor: interactor, presentation: onNavigation))
+    public func bind<V: NavigableViewModel, I: Interactor<V>>(
+        _ interactor: I,
+        setup: ((I) -> Void)? = nil,
+        onError: ((Error) -> Bool)? = nil,
+        onNavigation: @escaping (V.Destination) -> IntentPresentation
+    ) -> some View {
+        bind(interactor, setup: setup, onError: onError).modifier(NavigationIntentModifier(interactor: interactor, presentation: onNavigation))
+    }
+    
+    /// Installs a fallback error handler for every interactor bound within this view's subtree.
+    ///
+    /// The handler flows down through the environment, so it applies to this view and its descendants
+    /// only — apply it on an ancestor of the `bind(_:)`-ed views (typically near the root of a feature
+    /// or app). It is consulted by `handleError(_:)` after the per-bind `onError` handler (which takes
+    /// priority); it is the last handler in the chain, so if it is absent the error is dropped.
+    ///
+    /// - Parameter callback: The closure invoked with any error not already handled by a per-bind
+    /// `onError` handler.
+    ///
+    /// - Returns: A view that scopes the handler to its subtree.
+    public func onInteractorError(_ callback: @escaping (Error) -> Void) -> some View {
+        modifier(InteractorErrorHandlerModifier(callback: callback))
     }
 }
 
@@ -481,13 +512,69 @@ private struct InteractorModifier<V: ViewModel, I: Interactor<V>>: ViewModifier 
     var interactor: I
     /// Some setup to apply to the interactor before calling `prepareIfNeeded`.
     var setup: ((I) -> Void)?
+    /// The per-bind error handler forwarded to the interactor. Return `true` to mark an error as
+    /// handled, `false` to let it fall through to the ambient handler and the view model.
+    var onError: ((Error) -> Bool)?
 
     @ViewBuilder
     func body(content: Content) -> some View {
         content
             .onAppear {
                 setup?(interactor)
+                interactor.onError = onError
+                interactor.ambientErrorHandler = ambientErrorHandler?.handle
                 interactor.prepareIfNeeded()
             }
+    }
+    
+    
+    //---------------
+    // MARK: Private
+    //---------------
+    
+    @Environment(\.interactorErrorHandler) private var ambientErrorHandler
+}
+
+/// Scopes the ambient error handler to a view subtree via the environment.
+///
+/// The carrier is held in `@State` so its identity stays stable across body evaluations: the
+/// environment compares it by reference, so a stable instance avoids invalidating readers on every
+/// pass. (Storing the closure directly in the environment would defeat comparison — SwiftUI cannot
+/// compare closures — so it is wrapped in a reference type instead.)
+private struct InteractorErrorHandlerModifier: ViewModifier {
+    @State private var handler: InteractorErrorHandler
+
+    init(callback: @escaping (Error) -> Void) {
+        _handler = State(initialValue: InteractorErrorHandler(callback))
+    }
+
+    func body(content: Content) -> some View {
+        content.environment(\.interactorErrorHandler, handler)
+    }
+}
+
+/// Carries the ambient error handler through the environment.
+///
+/// A reference type so the environment compares it by identity (keeping the value stable); the
+/// closure it wraps is never compared by SwiftUI — it only ever lives inside this class and, once
+/// injected, inside the interactor.
+@MainActor
+private final class InteractorErrorHandler {
+    let handle: (Error) -> Void
+
+    init(_ handle: @escaping (Error) -> Void) {
+        self.handle = handle
+    }
+}
+
+private struct InteractorErrorHandlerKey: EnvironmentKey {
+    static let defaultValue: InteractorErrorHandler? = nil
+}
+
+extension EnvironmentValues {
+    /// The ambient error handler installed by `onInteractorError(_:)`, scoped to a view subtree.
+    fileprivate var interactorErrorHandler: InteractorErrorHandler? {
+        get { self[InteractorErrorHandlerKey.self] }
+        set { self[InteractorErrorHandlerKey.self] = newValue }
     }
 }

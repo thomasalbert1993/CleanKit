@@ -10,7 +10,6 @@ import Observation
 /// @Observable
 /// @MainActor
 /// final class HomeViewModel: ViewModel {
-///     var errorMessage: String?
 ///     var isWaiting = false
 ///     // ... screen-specific state ...
 /// }
@@ -20,9 +19,6 @@ import Observation
 /// compose against these protocols rather than inheriting from a base class.
 @MainActor
 public protocol ViewModel: AnyObject, Observable {
-    
-    /// The presented error message.
-    var errorMessage: String? { get set }
 
     /// Whether a global asynchronous task is currently running.
     var isWaiting: Bool { get set }
@@ -34,7 +30,6 @@ public protocol ViewModel: AnyObject, Observable {
 /// @Observable
 /// @MainActor
 /// final class HomeViewModel: NavigableViewModel {
-///     var errorMessage: String?
 ///     var isWaiting = false
 ///     var navigation: NavigationIntent<HomeDestination>?
 ///     // ... screen-specific state ...

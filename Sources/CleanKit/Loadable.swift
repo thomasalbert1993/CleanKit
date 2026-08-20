@@ -2,8 +2,9 @@ import Foundation
 
 /// The loading state of a single piece of content.
 ///
-/// Orthogonal to the view model's ambient `errorMessage` / `isWaiting`: a `.failed` here is the
-/// error of *this* content's load, and a screen may hold several independent `Loadable` values.
+/// Orthogonal to the interactor's error-handling chain and the view model's ambient `isWaiting`: a
+/// `.failed` here is the error of *this* content's load, and a screen may hold several independent
+/// `Loadable` values.
 /// There is deliberately no `.empty` case — emptiness is a property of the loaded value, derived by
 /// the consumer (see `isEmpty` for collections), so `Loadable` works equally for a single element
 /// (`Loadable<Post>`) or a collection (`Loadable<[Post]>`).
